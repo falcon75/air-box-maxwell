@@ -96,9 +96,9 @@ ksp.setOperators(A)
 
 ams_options = {"pc_hypre_ams_cycle_type": 1,
                  "pc_hypre_ams_tol": 1e-8,
-                 "solver_atol": 1e-8, "solver_rtol": 1e-8,
-                 "solver_initial_guess_nonzero": False,
-                 "solver_type": "gmres"}
+                 "ksp_atol": 1e-8, "ksp_rtol": 1e-8,
+                 "ksp_initial_guess_nonzero": False,
+                 "ksp_type": "gmres"}
 petsc_options = {}
 
 pc = ksp.getPC()
