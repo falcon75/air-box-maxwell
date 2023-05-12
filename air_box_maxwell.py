@@ -8,17 +8,32 @@ from dolfinx.io import XDMFFile, VTXWriter
 from ufl import TrialFunction, TestFunction,  curl, dx, inner, cos, as_vector, pi, SpatialCoordinate, VectorElement 
 
 
+# save_function and inspiration from https://github.com/jpdean/maxwell.git :
+def save_function(v, filename):
+    """Save a function v to file. The function is interpolated into a
+    discontinuous Lagrange space so that functions in Nedelec and
+    Raviart-Thomas spaces can be visualised exactly"""
+    mesh = v.function_space.mesh
+    k = v.function_space.ufl_element().degree()
+    # NOTE: Alternatively could pass this into function so it doesn't need
+    # to be created each time
+    W = VectorFunctionSpace(mesh, ("Discontinuous Lagrange", k))
+    w = Function(W)
+    w.name = v.name
+    w.interpolate(v)
+    with VTXWriter(mesh.comm, filename, [w]) as file:
+        file.write(0.0)
+
 # Unit cube mesh
 n = 50
 mesh = create_unit_cube(MPI.COMM_WORLD, n, n, n, cell_type=CellType.tetrahedron)
 tdim =  mesh.topology.dim
 x = SpatialCoordinate(mesh)
 
-
 # Define alpha and beta functions
 S = FunctionSpace(mesh, ("DG", 0))
 beta = Function(S)
-beta.x.array[:] = 0
+beta.x.array[:] = 0 # set beta in non conductive region to 0
 alpha = Constant(mesh, 1.0)
 
 def conductive_marker(x):
@@ -29,19 +44,17 @@ def conductive_marker(x):
     return marked
 
 cells = locate_entities(mesh, tdim, conductive_marker)
-beta.x.array[cells] = 1.0
+beta.x.array[cells] = 1.0 # set beta in conductive region to 1
 
 with XDMFFile(MPI.COMM_WORLD, "mesh_out.xdmf", "w") as xdmf:
     xdmf.write_mesh(mesh)
     xdmf.write_function(beta)
 
-
-# Define exact solution and source term
+# Define boundary condition (this is the exact solution from the constant beta cube)
 u_e = as_vector((cos(pi * x[1]), cos(pi * x[2]), cos(pi * x[0])))
 f = curl(curl(u_e)) + u_e
 
-
-# Define variational problem
+# Formulation
 degree = 1
 V = FunctionSpace(mesh, ("N1curl", degree))
 ndofs = V.dofmap.index_map.size_global * V.dofmap.index_map_bs
@@ -96,8 +109,6 @@ opts.prefixPush(option_prefix)
 for option, value in petsc_options.items():
     opts[option] = value
 opts.prefixPop()
-pc.setType("hypre")
-pc.setHYPREType("ams")
 
 option_prefix = ksp.getOptionsPrefix()
 opts.prefixPush(option_prefix)
@@ -105,24 +116,20 @@ for option, value in ams_options.items():
     opts[option] = value
 opts.prefixPop()
 
-V_CG = FunctionSpace(mesh, ("CG", degree))._cpp_object
-G = discrete_gradient(V_CG, V._cpp_object)
-G.assemble()
-pc.setHYPREDiscreteGradient(G)
+pc.setType("hypre")
+pc.setHYPREType("ams")
 
 W = FunctionSpace(mesh, ("CG", degree))
 G = discrete_gradient(W._cpp_object, V._cpp_object)
 G.assemble()
 
-qel = VectorElement("CG", mesh.ufl_cell(), degree)
-Q3 = FunctionSpace(mesh, qel)
-Pi = interpolation_matrix(Q3._cpp_object, V._cpp_object)
+X = VectorElement("CG", mesh.ufl_cell(), degree)
+Q = FunctionSpace(mesh, X)
+Pi = interpolation_matrix(Q._cpp_object, V._cpp_object)
 Pi.assemble()
 
-ksp.pc.setType("hypre")
-ksp.pc.setHYPREType("ams")
-ksp.pc.setHYPREDiscreteGradient(G)
-ksp.pc.setHYPRESetInterpolations(dim=mesh.geometry.dim, ND_Pi_Full=Pi)
+pc.setHYPREDiscreteGradient(G)
+pc.setHYPRESetInterpolations(dim=mesh.geometry.dim, ND_Pi_Full=Pi)
 
 
 # Set Nodes Interior to Non-Conductive Region
@@ -156,21 +163,4 @@ ksp.solve(b, u.vector)
 u.x.scatter_forward()
 
 print(f"Convergence reason: {ksp.getConvergedReason()}")
-
-# from https://github.com/jpdean/maxwell.git :
-def save_function(v, filename):
-    """Save a function v to file. The function is interpolated into a
-    discontinuous Lagrange space so that functions in Nedelec and
-    Raviart-Thomas spaces can be visualised exactly"""
-    mesh = v.function_space.mesh
-    k = v.function_space.ufl_element().degree()
-    # NOTE: Alternatively could pass this into function so it doesn't need
-    # to be created each time
-    W = VectorFunctionSpace(mesh, ("Discontinuous Lagrange", k))
-    w = Function(W)
-    w.name = v.name
-    w.interpolate(v)
-    with VTXWriter(mesh.comm, filename, [w]) as file:
-        file.write(0.0)
-
 save_function(u, "output.bp")
