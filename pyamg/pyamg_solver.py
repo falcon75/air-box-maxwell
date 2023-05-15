@@ -57,7 +57,7 @@ def conductive_marker(x):
 
 
 conductive_cells = locate_entities(mesh, tdim, conductive_marker)
-beta.x.array[conductive_cells] = 1e8    # set beta in conductive region to 1
+beta.x.array[conductive_cells] = 1e6    # set beta in conductive region to 1
 # set beta in non conductive region to 0
 beta.x.array[:] = 1
 
