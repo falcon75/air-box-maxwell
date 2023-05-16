@@ -8,16 +8,13 @@ from dolfinx.cpp.fem.petsc import (discrete_gradient, interpolation_matrix)
 from dolfinx.io import XDMFFile, VTXWriter
 from ufl import TrialFunction, TestFunction,  curl, dx, grad, inner, cos, as_vector, pi, SpatialCoordinate, VectorElement
 import scipy.sparse
-
 import scipy
 import matplotlib.pyplot as plt
 import pyamg
 
-
 from edgeAMG import edgeAMG
 
 # save_function and inspiration from https://github.com/jpdean/maxwell.git :
-
 
 def save_function(v, filename):
     """Save a function v to file. The function is interpolated into a
@@ -36,7 +33,7 @@ def save_function(v, filename):
 
 
 # Unit cube mesh
-n = 10
+n = 40
 mesh = create_unit_cube(MPI.COMM_WORLD, n, n, n,
                         cell_type=CellType.tetrahedron)
 tdim = mesh.topology.dim
@@ -57,9 +54,10 @@ def conductive_marker(x):
 
 
 conductive_cells = locate_entities(mesh, tdim, conductive_marker)
-beta.x.array[conductive_cells] = 1e6    # set beta in conductive region to 1
-# set beta in non conductive region to 0
-beta.x.array[:] = 1
+
+## -- Parameters of Interest -- ##
+beta.x.array[:] = 1e-10 # set beta in non conductive region to 0
+beta.x.array[conductive_cells] = 1.0  # set beta in conductive region to 1
 
 # Define boundary condition (this is the exact solution from the constant beta cube)
 u_e = as_vector((cos(pi * x[1]), cos(pi * x[2]), cos(pi * x[0])))
@@ -76,15 +74,13 @@ v = TestFunction(V)
 a = form(inner(alpha * curl(u), curl(v)) * dx + inner(beta * u, v) * dx)
 L = form(inner(f, v) * dx)
 
-
+## -- New -- ##
 V_H1 = FunctionSpace(mesh, ("Lagrange", degree))
 u1 = TrialFunction(V_H1)
 v1 = TestFunction(V_H1)
 a_h1 = form(inner(alpha * grad(u1), grad(v1)) * dx + inner(beta * u1, v1) * dx)
 
-
 u = Function(V)
-
 
 def boundary_marker(x):
     boundaries = [np.logical_or(np.isclose(
@@ -105,11 +101,12 @@ bc = dirichletbc(u_bc, boundary_dofs)
 
 A = assemble_matrix(a, bcs=[bc])
 A.finalize()
+A1 = petsc.assemble_matrix(a, bcs=[bc])
+A1.assemble()
 
-
+## -- New -- ##
 A_node = assemble_matrix(a_h1, bcs=[bc])
 A_node.finalize()
-
 Anode = scipy.sparse.csr_matrix((A_node.data, A_node.indices, A_node.indptr))
 
 b = petsc.assemble_vector(L)
@@ -118,7 +115,7 @@ b.ghostUpdate(addv=PETSc.InsertMode.ADD,
               mode=PETSc.ScatterMode.REVERSE)
 petsc.set_bc(b, [bc])
 
-
+## -- New Solver -- ##
 # Create a scipy sparse matrix that shares data with A
 As = scipy.sparse.csr_matrix((A.data, A.indices, A.indptr))
 
@@ -126,15 +123,16 @@ x0 = np.ones_like(b.array)
 r_None = []
 r_SA = []
 r_edgeAMG = []
+r_hypre = []
 
 
-# SA solver
+## -- SA solver -- ##
 ml_SA = pyamg.smoothed_aggregation_solver(As)
 ML_SAOP = ml_SA.aspreconditioner()
 x_prec, info = pyamg.krylov.cg(As, b, x0, maxiter=200, M=ML_SAOP, tol=1e-8, residuals=r_SA)
 
 
-# edgeAMG
+# -- edgeAMG -- ##
 W = FunctionSpace(mesh, ("CG", degree))
 G = discrete_gradient(W._cpp_object, V._cpp_object)
 G.assemble()
@@ -142,19 +140,75 @@ ai, aj, av = G.getValuesCSR()
 D = scipy.sparse.csr_matrix((av, aj, ai))
 ml = edgeAMG(Anode, As, D)
 MLOp = ml.aspreconditioner()
-x_prec, info = pyamg.krylov.cg(
-    As, b, x0, maxiter=200, M=MLOp, tol=1e-8, residuals=r_edgeAMG)
+x_prec, info = pyamg.krylov.cg(As, b, x0, maxiter=200, M=MLOp, tol=1e-8, residuals=r_edgeAMG)
 
+# -- no preconditioner -- ##
+x_prec, info = pyamg.krylov.cg(As, b, x0, maxiter=200, M=None, tol=1e-8, residuals=r_None)
 
-# No preconditioner
-x_prec, info = pyamg.krylov.cg(
-    As, b, x0, maxiter=200, M=None, tol=1e-8, residuals=r_None)
+## -- hypre ams -- ##
+ksp = PETSc.KSP().create(mesh.comm)
+ksp.setOptionsPrefix(f"ksp_{id(ksp)}")
+ksp.setOperators(A1)
+
+ams_options = {"pc_hypre_ams_cycle_type": 7,
+                 "pc_hypre_ams_tol": 1e-8,
+                 "ksp_atol": 1e-8, "ksp_rtol": 1e-8,
+                 "ksp_type": "gmres"}
+
+petsc_options = {"ksp_norm_type": "unpreconditioned",}
+
+pc = ksp.getPC()
+opts = PETSc.Options()
+
+option_prefix = ksp.getOptionsPrefix()
+opts.prefixPush(option_prefix)
+for option, value in petsc_options.items():
+    opts[option] = value
+opts.prefixPop()
+
+option_prefix = ksp.getOptionsPrefix()
+opts.prefixPush(option_prefix)
+for option, value in ams_options.items():
+    opts[option] = value
+opts.prefixPop()
+
+pc.setType("hypre")
+pc.setHYPREType("ams")
+
+W = FunctionSpace(mesh, ("CG", degree))
+G = discrete_gradient(W._cpp_object, V._cpp_object)
+G.assemble()
+
+X = VectorElement("CG", mesh.ufl_cell(), degree)
+Q = FunctionSpace(mesh, X)
+Pi = interpolation_matrix(Q._cpp_object, V._cpp_object)
+Pi.assemble()
+
+pc.setHYPREDiscreteGradient(G)
+pc.setHYPRESetInterpolations(dim=mesh.geometry.dim, ND_Pi_Full=Pi)
+
+def monitor(ksp, its, rnorm):
+    if mesh.comm.rank == 0:
+        print(f"Iteration: {its}, rel. residual: {rnorm}")
+        r_hypre.append(rnorm)
+
+ksp.setMonitor(monitor)
+ksp.setFromOptions()
+pc.setUp()
+ksp.setUp()
+ksp.view()
+
+ksp.solve(b, u.vector)
+u.x.scatter_forward()
+
+print(f"Convergence reason: {ksp.getConvergedReason()}")
 
 
 fig, ax = plt.subplots()
 ax.semilogy(np.arange(0, len(r_edgeAMG)), r_edgeAMG, label='edge AMG')
 ax.semilogy(np.arange(0, len(r_None)), r_None, label='CG')
 ax.semilogy(np.arange(0, len(r_SA)), r_SA, label='CG + AMG')
+ax.semilogy(np.arange(0, len(r_hypre)), r_hypre, label='GMRES + AMS')
 ax.grid(True)
 plt.legend()
 

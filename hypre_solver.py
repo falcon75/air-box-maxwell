@@ -25,7 +25,7 @@ def save_function(v, filename):
         file.write(0.0)
 
 # Unit cube mesh
-n = 50
+n = 32
 mesh = create_unit_cube(MPI.COMM_WORLD, n, n, n, cell_type=CellType.tetrahedron)
 tdim =  mesh.topology.dim
 x = SpatialCoordinate(mesh)
@@ -33,7 +33,7 @@ x = SpatialCoordinate(mesh)
 # Define alpha and beta functions
 S = FunctionSpace(mesh, ("DG", 0))
 beta = Function(S)
-beta.x.array[:] = 0 # set beta in non conductive region to 0
+beta.x.array[:] = 1e-11 # set beta in non conductive region to 0
 alpha = Constant(mesh, 1.0)
 
 def conductive_marker(x):
@@ -46,9 +46,9 @@ def conductive_marker(x):
 cells = locate_entities(mesh, tdim, conductive_marker)
 beta.x.array[cells] = 1.0 # set beta in conductive region to 1
 
-with XDMFFile(MPI.COMM_WORLD, "mesh_out.xdmf", "w") as xdmf:
-    xdmf.write_mesh(mesh)
-    xdmf.write_function(beta)
+# with XDMFFile(MPI.COMM_WORLD, "beta/beta.xdmf", "w") as xdmf:
+#     xdmf.write_mesh(mesh)
+#     xdmf.write_function(beta)
 
 # Define boundary condition (this is the exact solution from the constant beta cube)
 u_e = as_vector((cos(pi * x[1]), cos(pi * x[2]), cos(pi * x[0])))
@@ -94,12 +94,12 @@ ksp = PETSc.KSP().create(mesh.comm)
 ksp.setOptionsPrefix(f"ksp_{id(ksp)}")
 ksp.setOperators(A)
 
-ams_options = {"pc_hypre_ams_cycle_type": 1,
-                 "pc_hypre_ams_tol": 1e-8,
-                 "ksp_atol": 1e-8, "ksp_rtol": 1e-8,
-                 "ksp_initial_guess_nonzero": False,
+ams_options = {"pc_hypre_ams_cycle_type": 7,
+                 "pc_hypre_ams_tol": 1e-10,
+                 "ksp_atol": 1e-10, "ksp_rtol": 1e-10,
                  "ksp_type": "gmres"}
-petsc_options = {}
+
+petsc_options = {"ksp_norm_type": "unpreconditioned",}
 
 pc = ksp.getPC()
 opts = PETSc.Options()
@@ -131,22 +131,28 @@ Pi.assemble()
 pc.setHYPREDiscreteGradient(G)
 pc.setHYPRESetInterpolations(dim=mesh.geometry.dim, ND_Pi_Full=Pi)
 
+# -- Set Interior Nodes -- ##
+# pc.setHYPRESetBetaPoissonMatrix(None)
 
 # Set Nodes Interior to Non-Conductive Region
-def non_conductive_marker(x):
-    inside = np.zeros(x.shape[1], dtype=np.int32)
-    for i in range(tdim):
-        inside += np.logical_and(x[i] > 0.25, x[i] < 0.75).astype(np.int32)
-    marked = inside == tdim
-    return ~marked
+# def non_conductive_marker(x):
+#     inside = np.zeros(x.shape[1], dtype=np.int32)
+#     for i in range(tdim):
+#         inside += np.logical_and(x[i] > 0.25, x[i] < 0.75).astype(np.int32)
+#     marked = inside == tdim
+#     return np.logical_not(marked)
 
-interior_nodes = np.zeros(ndofs)
-cells = locate_entities(mesh, tdim, non_conductive_marker)
-dof_ind = locate_dofs_topological(V, entity_dim=tdim, entities=cells)
-interior_nodes[dof_ind] = 1.0
-interior_nodes = PETSc.Vec().createWithArray(interior_nodes)
-pc.setHYPREAMSSetInteriorNodes(interior_nodes)
+# interior_nodes1 = np.zeros(ndofs)
+# cells = locate_entities(mesh, tdim, non_conductive_marker)
+# dof_ind = locate_dofs_topological(V, entity_dim=tdim, entities=cells)
+# interior_nodes1[dof_ind] = 1.0
+# interior_nodes = Function(V)
+# interior_nodes.x.array[:] = interior_nodes1
+# pc.setHYPREAMSSetInteriorNodes(interior_nodes.vector)
 
+# with XDMFFile(MPI.COMM_WORLD, "interior.xdmf", "w") as xdmf:
+#     xdmf.write_mesh(mesh)
+#     xdmf.write_function(interior_nodes)
 
 # Solve
 def monitor(ksp, its, rnorm):

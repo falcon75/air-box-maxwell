@@ -50,7 +50,7 @@ def conductive_marker(x):
 conductive_cells = locate_entities(mesh, tdim, conductive_marker)
 beta.x.array[conductive_cells] = 1.0  # set beta in conductive region to 1
 
-with XDMFFile(MPI.COMM_WORLD, "mesh_out.xdmf", "w") as xdmf:
+with XDMFFile(MPI.COMM_WORLD, "beta/beta.xdmf", "w") as xdmf:
     xdmf.write_mesh(mesh)
     xdmf.write_function(beta)
 
